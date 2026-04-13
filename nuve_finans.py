@@ -25,13 +25,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 1. VERİ MOTORLARI (GÜÇLENDİRİLMİŞ)
+# 1. VERİ MOTORLARI
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_chunk(fon_kodu, start_date, end_date):
-    """
-    TEFAS'tan veri çekerken hata olursa 3 kez tekrar dener (Retry Logic).
-    """
     s_str = start_date.strftime("%d.%m.%Y")
     e_str = end_date.strftime("%d.%m.%Y")
     url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
@@ -42,32 +39,28 @@ def fetch_chunk(fon_kodu, start_date, end_date):
         "X-Requested-With": "XMLHttpRequest"
     }
     
-    # 3 Kez Deneme Hakkı
     for attempt in range(3):
         try:
             response = requests.post(url, data=payload, headers=headers, timeout=15, verify=False)
             data = response.json().get('data', [])
-            if data: # Veri geldiyse döndür
-                return data
-            else:
-                time.sleep(0.5) # Boş geldiyse az bekle tekrar dene
+            if data: return data
+            else: time.sleep(0.5)
         except:
-            time.sleep(1) # Hata aldıysa 1 sn bekle tekrar dene
+            time.sleep(1)
             
-    return [] # 3 kere denedi yine olmadıysa boş dön
+    return []
 
 @st.cache_data(ttl=3600)
 def get_tefas_history(fon_kodu, start_date, end_date):
     all_data = []
     current_start = start_date
     while current_start < end_date:
-        # TEFAS genelde 90 gün üstünü tek seferde vermez, 80 güne bölelim garanti olsun
         current_end = min(current_start + timedelta(days=80), end_date)
         chunk = fetch_chunk(fon_kodu, current_start, current_end)
         if chunk:
             all_data.extend(chunk)
         current_start = current_end + timedelta(days=1)
-        time.sleep(0.1) # Seri istek atıp IP ban yemeyelim
+        time.sleep(0.1)
     
     if not all_data: return None
     df = pd.DataFrame(all_data)
@@ -103,7 +96,6 @@ def get_market_data(symbol, start_date, end_date):
 # ==========================================
 with st.sidebar:
     st.title("⚙️ Kontrol Paneli")
-    # Varsayılan tarihi biraz geriye çektim ki grafik düzgün oluşsun
     date_start = st.date_input("Başlangıç", datetime.now() - timedelta(days=365))
     date_end = st.date_input("Bitiş", datetime.now())
     st.markdown("---")
@@ -129,7 +121,6 @@ C | KPC:10, KLU:30, KUT:50, KTJ:10""")
 st.title("🚀 Nüve Uzay | Varlık Yönetimi")
 
 if btn_run:
-    # --- 1. SEPETLERİ PARSE ET ---
     baskets = {}
     unique_assets = set()
     
@@ -161,11 +152,10 @@ if btn_run:
         st.error("❌ Hiçbir geçerli sepet bulunamadı.")
         st.stop()
 
-    # --- 2. VERİLERİ ÇEK ---
     t1, t2 = pd.to_datetime(date_start), pd.to_datetime(date_end)
     df_pool = pd.DataFrame()
     
-    with st.spinner('Piyasa verileri toplanıyor... (Hata olursa otomatik tekrar denenecek)'):
+    with st.spinner('Piyasa verileri toplanıyor...'):
         if show_usd and 'USD' not in unique_assets: unique_assets.add('USD')
         if show_gold and 'ALTIN' not in unique_assets: unique_assets.add('ALTIN')
 
@@ -185,24 +175,23 @@ if btn_run:
             
             if df_raw is not None and not df_raw.empty:
                 df_raw.columns = [kod]
+                # Mükerrer indexleri temizle
+                df_raw = df_raw[~df_raw.index.duplicated(keep='first')]
                 if df_pool.empty: df_pool = df_raw
                 else: df_pool = df_pool.join(df_raw, how='outer')
 
-        # Eksik verileri doldurma (ffill: önceki günü kopyala)
-# Eksik verileri doldurma (Yeni Pandas versiyonu uyumlu)
-        df_pool = df_pool.ffill()
-        df_pool = df_pool.bfill()
-        df_pool = df_pool.loc[t1:t2]
+        # GÜNCELLENEN KISIM: ffill ve bfill yeni yöntem
+        if not df_pool.empty:
+            df_pool = df_pool.ffill().bfill()
+            df_pool = df_pool.loc[t1:t2]
 
         if df_pool.empty:
             st.error("❌ Veri yok. Tarih aralığını kontrol edin.")
             st.stop()
 
-    # --- 3. HESAPLAMALAR ---
     df_baskets = pd.DataFrame(index=df_pool.index)
     basket_metrics = {}
 
-    # -- A. Sepet Hesapları --
     for b_name, assets in baskets.items():
         valid_assets = {k:v for k,v in assets.items() if k in df_pool.columns}
         if not valid_assets: continue
@@ -214,13 +203,11 @@ if btn_run:
                 daily_vals += df_pool[kod] * lot
         df_baskets[b_name] = daily_vals
 
-    # -- B. Referanslar --
     if 'USD' in df_pool.columns and show_usd:
         df_baskets['DOLAR (Ref)'] = (df_pool['USD'] / df_pool['USD'].iloc[0]) * money
     if 'ALTIN' in df_pool.columns and show_gold:
         df_baskets['ALTIN (Ref)'] = (df_pool['ALTIN'] / df_pool['ALTIN'].iloc[0]) * money
 
-    # -- C. Tekil Fonların Performansı (Kıyaslama İçin) --
     df_assets_sim = pd.DataFrame(index=df_pool.index)
     if show_details:
         for col in df_pool.columns:
@@ -229,68 +216,45 @@ if btn_run:
             if s_val > 0:
                 df_assets_sim[f"{col} (Fon)"] = (df_pool[col] / s_val) * money
 
-    # Birleştirilmiş Dataframe
     df_all_values = pd.concat([df_baskets, df_assets_sim], axis=1)
 
-    # Metrikleri Hesapla
-    report_cols = df_baskets.columns 
-    
-    for col in report_cols:
+    for col in df_baskets.columns:
         vals = df_baskets[col]
         son_brut = vals.iloc[-1]
         
-        # --- STOPAJ HESABI (YENİ VE DÜZELTİLMİŞ) ---
-        # 1. Referanslarda (Dolar, Altın) Stopaj Yok
-        if "(Ref)" in col or "USD" in col or "DOLAR" in col or "ALTIN" in col:
+        if "(Ref)" in col or any(x in col for x in ["USD", "DOLAR", "ALTIN"]):
             effective_stopaj = 0.0
         else:
-            # 2. Fon Sepetlerinde %17.5 Stopaj
             effective_stopaj = 0.175
         
         kar_brut = son_brut - money
-        vergi = 0
-        if kar_brut > 0:
-            vergi = kar_brut * effective_stopaj
+        vergi = max(0, kar_brut * effective_stopaj)
         
         son_net = son_brut - vergi
         kar_net = son_net - money
         
-        # --- AYLIK GELİR VE NET AKIŞ ---
         gunluk = vals.pct_change().mean()
-        
-        # Aylık BRÜT Kazanç
         aylik_kazanc_brut = son_brut * (gunluk * 21) 
         
-        # Aylık NET Kazanç
-        aylik_kazanc_net = 0
         if aylik_kazanc_brut > 0:
             aylik_kazanc_net = aylik_kazanc_brut * (1 - effective_stopaj)
         else:
-            aylik_kazanc_net = aylik_kazanc_brut # Zararsa vergi yok
+            aylik_kazanc_net = aylik_kazanc_brut
             
         net_akis = aylik_kazanc_net - expense
         
         if net_akis > 0:
             omur, renk = "Sonsuz (Artıda) 🚀", "normal"
         else:
-            # Ömür hesabında net varlığı, net akışa bölüyoruz
             omur = f"{(son_net / abs(net_akis)):.1f} Ay" if abs(net_akis) > 0 else "Hesaplanamadı"
             renk = "inverse"
         
         basket_metrics[col] = {
-            "son": son_net, 
-            "kar": kar_net, 
-            "aylik_gelir": aylik_kazanc_net, 
-            "net_akis": net_akis, 
-            "omur": omur, 
-            "renk": renk,
-            "vergi": vergi
+            "son": son_net, "kar": kar_net, "aylik_gelir": aylik_kazanc_net, 
+            "net_akis": net_akis, "omur": omur, "renk": renk, "vergi": vergi
         }
 
-    # ==========================================
-    # 4. GÖRSELLEŞTİRME
-    # ==========================================
-    
+    # GÖRSELLEŞTİRME
     color_map = {'DOLAR (Ref)': '#2ecc71', 'ALTIN (Ref)': '#f1c40f'}
     base_colors = ['#3498db', '#e74c3c', '#9b59b6', '#f39c12', '#1abc9c', '#34495e', '#d35400', '#7f8c8d']
     
@@ -300,7 +264,6 @@ if btn_run:
             color_map[col] = base_colors[b_idx % len(base_colors)]
             b_idx += 1
 
-    # --- Yüzdesel Normalize Et ---
     df_norm = df_all_values.copy()
     for col in df_norm.columns:
         s_v = df_norm[col].iloc[0]
@@ -308,29 +271,20 @@ if btn_run:
             df_norm[col] = ((df_norm[col] / s_v) - 1) * 100
 
     st.header("Geçmiş Performans Analizi (Brüt Değerler)")
-
-    # --- GRAFİK 1 & 2 ---
     c1, c2 = st.columns([3, 1])
     
     with c1:
-        st.subheader("🏁 1. Getiri Yarışı (%) - Sepetler ve İçerikleri")
+        st.subheader("🏁 1. Getiri Yarışı (%)")
         fig1, ax1 = plt.subplots(figsize=(10, 6))
-        
         for col in df_norm.columns:
-            is_ref = "(Ref)" in col
-            is_fon = "(Fon)" in col
-            
+            is_ref, is_fon = "(Ref)" in col, "(Fon)" in col
             if is_ref: lw, ls, alpha = 2.5, '--', 0.9
             elif is_fon: lw, ls, alpha = 1.0, '-', 0.6
             else: lw, ls, alpha = 3.5, '-', 1.0
-            
-            c = color_map.get(col, 'gray')
-            ax1.plot(df_norm.index, df_norm[col], label=col, linewidth=lw, linestyle=ls, color=c, alpha=alpha)
-        
+            ax1.plot(df_norm.index, df_norm[col], label=col, linewidth=lw, linestyle=ls, color=color_map.get(col, 'gray'), alpha=alpha)
         ax1.axhline(0, color='black', linewidth=1)
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='upper left', fontsize='small', framealpha=0.8) 
-        ax1.set_ylabel("Getiri (%)")
         st.pyplot(fig1)
         
     with c2:
@@ -339,161 +293,50 @@ if btn_run:
             last_vals = df_norm.iloc[-1].sort_values(ascending=False)
             fig2, ax2 = plt.subplots(figsize=(5, 8))
             bar_colors = ['#27ae60' if x>=0 else '#c0392b' for x in last_vals.values]
-            bars = ax2.barh(last_vals.index, last_vals.values, color=bar_colors)
+            ax2.barh(last_vals.index, last_vals.values, color=bar_colors)
             ax2.axvline(0, color='black', linewidth=0.5)
-            for bar in bars:
-                width = bar.get_width()
-                label_x_pos = width + 1 if width >= 0 else width - 5
-                ax2.text(label_x_pos, bar.get_y() + bar.get_height()/2, f"%{width:.1f}", va='center', fontweight='bold', fontsize=9)
-            ax2.grid(axis='x', alpha=0.3)
             st.pyplot(fig2)
 
-    st.markdown("---")
-
-    # --- GRAFİK 3: NAKİT DURUMU ---
-    st.subheader(f"💰 3. Net Nakit Durumu (Ana Para: {money:,.0f} TL | Aylık Gider: {expense:,.0f} TL Düşülmüş)")
-    st.caption("Not: İnce çizgiler tekil fonları, kalın çizgiler sepetlerinizi temsil eder. (Grafik Brüt Piyasa Değeridir)")
-    
+    st.subheader(f"💰 3. Net Nakit Durumu")
     if not df_all_values.empty:
         fig3, ax3 = plt.subplots(figsize=(15, 7))
         days_passed = (df_all_values.index - df_all_values.index[0]).days
         cumulative_expense = days_passed * (expense / 30)
-
-        sorted_cols = [c for c in df_all_values.columns if "(Fon)" in c] + \
-                      [c for c in df_all_values.columns if "(Ref)" in c] + \
-                      [c for c in df_all_values.columns if "(Ref)" not in c and "(Fon)" not in c]
-
-        for col in sorted_cols:
+        for col in df_all_values.columns:
             net_varlik = df_all_values[col] - cumulative_expense
-            son_durum = net_varlik.iloc[-1]
-            c = color_map.get(col, 'gray')
-            is_fon = "(Fon)" in col
-            is_ref = "(Ref)" in col
-            
-            if is_ref: lw, ls, alpha = 2, '--', 0.8
-            elif is_fon: lw, ls, alpha = 1, '-', 0.5
-            else: lw, ls, alpha = 3, '-', 1.0
-            
-            ax3.plot(net_varlik.index, net_varlik, label=f"{col}", linewidth=lw, linestyle=ls, color=c, alpha=alpha)
-
-        ax3.axhline(0, color='red', linestyle='--', linewidth=2, label='İflas Hattı (0 TL)')
-        ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+            is_ref, is_fon = "(Ref)" in col, "(Fon)" in col
+            lw, ls, alpha = (2, '--', 0.8) if is_ref else ((1, '-', 0.5) if is_fon else (3, '-', 1.0))
+            ax3.plot(net_varlik.index, net_varlik, label=col, linewidth=lw, linestyle=ls, color=color_map.get(col, 'gray'), alpha=alpha)
+        ax3.axhline(0, color='red', linestyle='--', linewidth=2)
         ax3.grid(True, alpha=0.3)
-        ax3.legend(bbox_to_anchor=(1.01, 1), loc='upper left', borderaxespad=0.)
         st.pyplot(fig3)
-    
-    st.markdown("---")
 
-    # --- RAPOR ---
-    st.header("📊 Finansal Rapor (Aylık Gelir ve Net Akış)")
-    st.info("ℹ️ **Aylık Gelir (Tahmini):** Portföyün geçmiş performansına göre 1 ayda ürettiği karın **Net (Vergi Düşülmüş)** halidir. \n\n"
-            "ℹ️ **Vergi Oranları:** Fon Sepetleri: **%17.5** | Dolar/Altın (Ref): **%0**")
-    rapor_cols = [c for c in df_baskets.columns if c in basket_metrics]
-    
-    for b_name in rapor_cols:
+    st.header("📊 Finansal Rapor")
+    for b_name in [c for c in df_baskets.columns if c in basket_metrics]:
         m = basket_metrics[b_name]
-        
-        if "(Ref)" in b_name: 
-            style = "color: #f1c40f;" if "ALTIN" in b_name else "color: #2ecc71;"
-            header_html = f"<div style='{style} font-weight: bold; font-size: 1.5em; margin-top: 20px; border-bottom: 1px solid #333; padding-bottom: 5px;'>{b_name}</div>"
-        else:
-            header_html = f"<div class='basket-header'>{b_name}</div>"
-
-        st.markdown(header_html, unsafe_allow_html=True)
-        # SÜTUNLARI 5'e ÇIKARDIM (Daha net olsun diye)
+        st.markdown(f"<div class='basket-header'>{b_name}</div>", unsafe_allow_html=True)
         c1, c2, c3, c4, c5 = st.columns(5)
-        
-        c1.metric("Toplam Varlık (Net)", f"{m['son']:,.0f} ₺", f"{m['kar']:,.0f} ₺ Net Kar")
-        c2.metric("Aylık Gelir (Net)", f"{m['aylik_gelir']:,.0f} ₺", "Ortalama Getiri")
-        c3.metric("Aylık Gider", f"{expense:,.0f} ₺", "Sabit", delta_color="inverse")
-        
-        delta_text = "Artıda" if m['net_akis'] > 0 else "Ekside"
-        c4.metric(f"Net Nakit Akışı", f"{m['net_akis']:,.0f} ₺", delta_text, delta_color=m['renk'])
-        
+        c1.metric("Toplam Net", f"{m['son']:,.0f} ₺")
+        c2.metric("Aylık Net Gelir", f"{m['aylik_gelir']:,.0f} ₺")
+        c3.metric("Aylık Gider", f"{expense:,.0f} ₺")
+        c4.metric("Net Akış", f"{m['net_akis']:,.0f} ₺", delta_color=m['renk'])
         c5.metric("Nakit Ömrü", m['omur'])
-        st.caption(f"📝 Kesilen Toplam Stopaj: **{m['vergi']:,.0f} TL**")
         st.divider()
 
-    # ==========================================
-    # 4. DETAYLI ERİME ANALİZİ (AYRI AYRI)
-    # ==========================================
-    st.markdown("---")
-    st.subheader("📉 4. Detaylı Düşüş Karnesi (Risk Analizi)")
-
-    if not df_all_values.empty:
-        # Sıralama: Sepetler -> Refler -> Fonlar
-        baskets_list = [c for c in df_baskets.columns if "(Ref)" not in c]
-        refs_list = [c for c in df_baskets.columns if "(Ref)" in c]
-        funds_list = [c for c in df_assets_sim.columns] if show_details else []
+    st.subheader("📉 4. Detaylı Düşüş Karnesi")
+    for asset in df_all_values.columns:
+        series = df_all_values[asset]
+        roll_max = series.cummax()
+        drawdown = (series - roll_max) / roll_max * 100
+        mdd_val = drawdown.min()
+        mdd_date = drawdown.idxmin()
         
-        sorted_assets = baskets_list + refs_list + funds_list
-
-        for asset in sorted_assets:
-            if asset not in df_all_values.columns: continue
-            
-            series = df_all_values[asset]
-            # Drawdown Hesapla
-            roll_max = series.cummax()
-            drawdown = (series - roll_max) / roll_max * 100
-            
-            # --- İSTATİSTİKLER ---
-            # 1. Max Drawdown (En dip)
-            mdd_val = drawdown.min()
-            mdd_date = drawdown.idxmin()
-            
-            # 2. En Uzun Sualtı Süresi (Longest Underwater Duration)
-            is_under = drawdown < -0.01 
-            blocks = (is_under != is_under.shift()).cumsum()
-            underwater_groups = series[is_under].groupby(blocks[is_under])
-            
-            max_days = 0
-            max_period_msg = "Süper (Hiç Düşmedi)"
-            
-            if underwater_groups.ngroups > 0:
-                durations = []
-                for _, g in underwater_groups:
-                    d0, d1 = g.index[0], g.index[-1]
-                    delta = (d1 - d0).days
-                    durations.append((delta, d0, d1))
-                
-                if durations:
-                    longest = max(durations, key=lambda x: x[0])
-                    max_days = longest[0]
-                    s_str = longest[1].strftime("%d.%m.%Y")
-                    e_str = longest[2].strftime("%d.%m.%Y")
-                    max_period_msg = f"{s_str} - {e_str}"
-
-            # --- GÖRSELLEŞTİRME ---
-            c_title, c_dummy = st.columns([3,1])
-            with c_title:
-                st.markdown(f"#### 🔹 {asset}")
-
-            c_chart, c_stat = st.columns([3, 1])
-            
-            with c_chart:
-                fig_sub, ax_sub = plt.subplots(figsize=(10, 3)) 
-                col_code = color_map.get(asset, 'gray')
-                
-                ax_sub.plot(drawdown.index, drawdown, color=col_code, linewidth=1.5)
-                ax_sub.fill_between(drawdown.index, drawdown, 0, color=col_code, alpha=0.3)
-                ax_sub.axhline(0, color='black', linestyle='--', linewidth=1)
-                
-                # En dip noktayı işaretle
-                ax_sub.scatter([mdd_date], [mdd_val], color='red', s=30, zorder=5)
-                if not pd.isnull(mdd_val):
-                     ax_sub.text(mdd_date, mdd_val - (abs(mdd_val)*0.1), f"%{mdd_val:.1f}", 
-                           ha='center', va='top', fontsize=9, color='red', fontweight='bold')
-                
-                ax_sub.set_ylabel("Kayıp (%)")
-                ax_sub.grid(True, alpha=0.2)
-                ax_sub.spines['top'].set_visible(False)
-                ax_sub.spines['right'].set_visible(False)
-                
-                st.pyplot(fig_sub)
-            
-            with c_stat:
-                st.markdown("##### 📊 Risk Karnesi")
-                st.metric("En Büyük Erime", f"%{mdd_val:.2f}", f"{mdd_date.strftime('%d.%m.%Y')}", delta_color="inverse")
-                st.metric("Zararda Beklenen En Uzun Süre", f"{max_days} Gün", max_period_msg, delta_color="off")
-                
-            st.divider()
+        c_chart, c_stat = st.columns([3, 1])
+        with c_chart:
+            fig_sub, ax_sub = plt.subplots(figsize=(10, 2))
+            ax_sub.plot(drawdown.index, drawdown, color=color_map.get(asset, 'gray'))
+            ax_sub.fill_between(drawdown.index, drawdown, 0, color=color_map.get(asset, 'gray'), alpha=0.2)
+            st.pyplot(fig_sub)
+        with c_stat:
+            st.metric(asset, f"%{mdd_val:.2f}")
+        st.divider()
