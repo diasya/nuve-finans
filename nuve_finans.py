@@ -189,8 +189,8 @@ if btn_run:
                 else: df_pool = df_pool.join(df_raw, how='outer')
 
         # Eksik verileri doldurma (ffill: önceki günü kopyala)
-        df_pool.fillna(method='ffill', inplace=True)
-        df_pool.fillna(method='bfill', inplace=True)
+        df_pool = df_pool.ffill()
+        df_pool = df_pool.bfill()
         df_pool = df_pool.loc[t1:t2]
 
         if df_pool.empty:
